@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html lang="he">
+<head>
+<meta charset="UTF-8" />
+<title>מציג הודעות MBOX בעברית</title>
+<style>
+  body {
+    font-family: Arial, sans-serif;
+    direction: rtl;
+    margin: 20px;
+  }
+  #messages {
+    display: flex;
+    flex-direction: column;
+    gap: 15px;
+  }
+  .message {
+    display: flex;
+    border: 1px solid #ccc;
+    border-radius: 6px;
+    overflow: hidden;
+    height: 200px;
+  }
+  .summary {
+    flex: 1 1 300px;
+    padding: 10px;
+    border-left: 1px solid #ccc;
+    background-color: #f9f9f9;
+    overflow-y: auto;
+  }
+  .body {
+    flex: 2 1 600px;
+    padding: 10px;
+    overflow-y: auto;
+    background-color: white;
+  }
+  button {
+    margin-bottom: 20px;
+  }
+  .email {
+    color: gray;
+    font-size: 0.9em;
+    direction: ltr;
+  }
+</style>
+</head>
+<body>
+
+<h1>טעינת קובץ MBOX והצגת ההודעות</h1>
+<input type="file" id="fileInput" accept=".mbox" />
+<div id="messages"></div>
+
+<script>
+// פונקציה לפענוח base64
+function base64Decode(base64) {
+  try {
+    return decodeURIComponent(escape(atob(base64)));
+  } catch {
+    return atob(base64); // fallback
+  }
+}
+
+// פונקציה לפענוח כותרות מקודדות לפי RFC 2047 (לדוגמה: =?UTF-8?B?...?=)
+function decodeMimeHeader(header) {
+  return header.replace(/=\?([^?]+)\?([BQ])\?([^?]+)\?=/gi, (match, charset, encoding, text) => {
+    if (encoding.toUpperCase() === 'B') {
+      const decoded = base64Decode(text);
+      return decoded;
+    }
+    if (encoding.toUpperCase() === 'Q') {
+      // Decode quoted-printable (Q encoding)
+      return text.replace(/_/g, ' ').replace(/=([A-Fa-f0-9]{2})/g, (m, hex) => String.fromCharCode(parseInt(hex, 16)));
+    }
+    return text;
+  });
+}
+
+// פונקציה לחילוץ שם ומייל משדה From
+function parseFromField(fromRaw) {
+  const decoded = decodeMimeHeader(fromRaw);
+  // מחפשים דוא"ל בתוך <>
+  const emailMatch = decoded.match(/<([^>]+)>/);
+  let name = decoded;
+  let email = '';
+
+  if (emailMatch) {
+    email = emailMatch[1];
+    name = decoded.replace(emailMatch[0], '').trim();
+    if (name.startsWith('"') && name.endsWith('"')) {
+      name = name.slice(1, -1);
+    }
+  } else {
+    // אם אין <>, בודקים אם יש דוא"ל פשוט בטקסט
+    const simpleEmailMatch = decoded.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/);
+    if (simpleEmailMatch) {
+      email = simpleEmailMatch[0];
+      name = decoded.replace(email, '').trim();
+    }
+  }
+
+  return { name: name || '(אין שם)', email: email || '(אין מייל)' };
+}
+
+// פונקציה לעיבוד הקובץ
+document.getElementById('fileInput').addEventListener('change', function (e) {
+  const file = e.target.files[0];
+  if (!file) return;
+
+  const reader = new FileReader();
+  reader.onload = function (event) {
+    const text = event.target.result;
+    parseMbox(text);
+  };
+  reader.readAsText(file, 'UTF-8');
+});
+
+function parseMbox(text) {
+  const messagesDiv = document.getElementById('messages');
+  messagesDiv.innerHTML = '';
+
+  // מפרידים בין הודעות לפי שורה שמתחילה ב"From "
+  const rawMessages = text.split(/^From .+$/m);
+
+  rawMessages.forEach(rawMsg => {
+    if (!rawMsg.trim()) return;
+
+    // שולפים פרטים מההודעה
+    // כותרות בסיסיות:
+    const fromMatch = rawMsg.match(/^מאת:\s*(.+)$/m) || rawMsg.match(/^From:\s*(.+)$/m);
+    const subjectMatch = rawMsg.match(/^נושא:\s*(.+)$/m) || rawMsg.match(/^Subject:\s*(.+)$/m);
+    const dateMatch = rawMsg.match(/^תאריך:\s*(.+)$/m) || rawMsg.match(/^Date:\s*(.+)$/m);
+
+    let fromRaw = fromMatch ? fromMatch[1].trim() : '(אין מידע)';
+    let subject = subjectMatch ? decodeMimeHeader(subjectMatch[1].trim()) : '(ללא נושא)';
+    let date = dateMatch ? dateMatch[1].trim() : '(ללא תאריך)';
+
+    // חילוץ שם ומייל מה-from
+    const { name: fromName, email: fromEmail } = parseFromField(fromRaw);
+
+    // מוצאים תוכן base64 של גוף ההודעה (העדפה לטקסט HTML, אם קיים)
+    let bodyBase64 = null;
+    let isHtml = false;
+
+    // חיפוש בלוקים עם Content-Type ו-Content-Transfer-Encoding
+    const contentBlocks = rawMsg.split(/^--.+$/m);
+    for (const block of contentBlocks) {
+      const ctMatch = block.match(/Content-Type:\s*([^;\n]+)(?:;\s*charset="([^"]+)")?/i);
+      const cteMatch = block.match(/Content-Transfer-Encoding:\s*(.+)/i);
+      if (!ctMatch || !cteMatch) continue;
+
+      const contentType = ctMatch[1].toLowerCase();
+      const encoding = cteMatch[1].toLowerCase().trim();
+
+      if ((contentType === 'text/html' || contentType === 'text/plain') && encoding === 'base64') {
+        // מוצאים את הטקסט base64 אחרי שתי שורות ריקות (או פחות) אחרי ההרכאות
+        const parts = block.split(/\r?\n\r?\n/);
+        if (parts.length < 2) continue;
+        const base64Text = parts.slice(1).join('\n').replace(/[\r\n]/g, '');
+
+        bodyBase64 = base64Text;
+        isHtml = contentType === 'text/html';
+        break; // מוצאים את החלק הראשון מתאים
+      }
+    }
+
+    let bodyContent = '';
+
+    if (bodyBase64) {
+      try {
+        const decoded = base64Decode(bodyBase64);
+        bodyContent = isHtml ? decoded : `<pre style="white-space: pre-wrap; font-family: inherit;">${decoded}</pre>`;
+      } catch {
+        bodyContent = '(לא ניתן לפענח את גוף ההודעה)';
+      }
+    } else {
+      bodyContent = '(לא נמצא גוף הודעה בקידוד base64)';
+    }
+
+    // בונים DIV להודעה
+    const messageDiv = document.createElement('div');
+    messageDiv.classList.add('message');
+
+    const summaryDiv = document.createElement('div');
+    summaryDiv.classList.add('summary');
+    summaryDiv.innerHTML =
+      `<strong>נושא:</strong> ${subject}<br>` +
+      `<strong>מאת:</strong> ${fromName} <span class="email">&lt;${fromEmail}&gt;</span><br>` +
+      `<strong>תאריך:</strong> ${date}`;
+
+    const bodyDiv = document.createElement('div');
+    bodyDiv.classList.add('body');
+    bodyDiv.innerHTML = bodyContent;
+
+    messageDiv.appendChild(summaryDiv);
+    messageDiv.appendChild(bodyDiv);
+
+    messagesDiv.appendChild(messageDiv);
+  });
+}
+</script>
+
+</body>
+</html>
